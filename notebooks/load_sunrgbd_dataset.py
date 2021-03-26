@@ -2,8 +2,8 @@ import numpy as np
 import glob
 import os
 import re
-import scipy.io
-import matplotlib.pyplot as plt
+
+
 
 REL_PATH = '/home4/shubham/MTML_Pth/datasets/SUNRGBD/'
 
