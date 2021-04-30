@@ -6,19 +6,22 @@ import glob
 import os
 import torchvision
 from torch.utils.data import Dataset, DataLoader
-from PIL import Image
+from PIL import Image, ImageFile
 import matplotlib.pyplot as plt
 import torch.nn as nn
 from scipy import io
 import time
 timestr = time.strftime("%Y%m%d-%H%M%S")
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # constant variables
 IMG_SIZE = (288, 384)
 
 # checkpoint path
-DEFAULT_CHECKPOINT_DIR = '/home4/shubham/MTML_Pth/checkpoints/' 
-VIS_RESULTS_PATH = '/home4/shubham/MTML_Pth/results/'
+REL = os.getcwd()
+DEFAULT_CHECKPOINT_DIR = REL + '/checkpoints/' 
+VIS_RESULTS_PATH = REL + '/results/'
+
 # paths to datasets
 # diode
 PATH_DIODE = '/drive/diode/'
@@ -26,22 +29,25 @@ TRAIN_DIODE = PATH_DIODE + 'train'
 TEST_DIODE = PATH_DIODE + 'val'
 
 # NYUv2
-TRAIN_NYU_RGB_PATH = "/home4/shubham/MTML_Pth/datasets/nyuv2/train_rgb/"
-TRAIN_NYU_SEG_PATH = "/home4/shubham/MTML_Pth/datasets/nyuv2/train_seg13/"
-TEST_NYU_RGB_PATH = "/home4/shubham/MTML_Pth/datasets/nyuv2/test_rgb/"
-TEST_NYU_SEG_PATH = "/home4/shubham/MTML_Pth/datasets/nyuv2/test_seg13/"
-TRAIN_NYU_SN_PATH = "/home4/shubham/MTML_Pth/datasets/nyuv2/train_sn/"
-TEST_NYU_SN_PATH = "/home4/shubham/MTML_Pth/datasets/nyuv2/test_sn/"
+TRAIN_NYU_RGB_PATH = REL + "/datasets/nyuv2/train_rgb/"
+TRAIN_NYU_SEG_PATH = REL + "/datasets/nyuv2/train_seg13/"
+TEST_NYU_RGB_PATH = REL + "/datasets/nyuv2/test_rgb/"
+TEST_NYU_SEG_PATH = REL + "/datasets/nyuv2/test_seg13/"
+TRAIN_NYU_SN_PATH = REL + "/datasets/nyuv2/train_sn/"
+TEST_NYU_SN_PATH = REL + "/datasets/nyuv2/test_sn/"
 
 # Scannet VP
-PATH_SCANNET_VP_TRAIN = '/drive/scannet-vp/'
+TRAIN_VP = REL + '/datasets/scannet_vp/train/'
+VAL_VP = REL + '/datasets/scannet_vp/val/'
+TEST_VP = REL + '/datasets/scannet_vp/test/'
 
-# SUNRGBD
-SUNRGBD_REL_PATH = '/home4/shubham/MTML_Pth/datasets/SUNRGBD/'
-PATH_SUNRGBD_TRAIN = '/home4/shubham/MTML_Pth/datasets/sunrgbd-meta-data/SUNRGBD-train_images/'
-PATH_SUNRGBD_TRAIN_LABEL = '/home4/shubham/MTML_Pth/datasets/sunrgbd-meta-data/train13labels/'
-PATH_SUNRGBD_TEST = '/home4/shubham/MTML_Pth/datasets/sunrgbd-meta-data/SUNRGBD-test_images/'
-PATH_SUNRGBD_TEST_LABEL = '/home4/shubham/MTML_Pth/datasets/sunrgbd-meta-data/test13labels/'
+#SUNRGBD
+TRAIN_SUNRGBD_IMAGES = REL + '/datasets/sun_nyu2/sunrgbd_train_images.txt'
+TEST_SUNRGBD_IMAGES = REL + '/datasets/sun_nyu2/sunrgbd_test_images.txt'
+TRAIN_SUNRGBD_DEPTH = REL + '/datasets/sun_nyu2/sunrgbd_train_depth.txt'
+TEST_SUNRGBD_DEPTH = REL + '/datasets/sun_nyu2/sunrgbd_test_depth.txt'
+TRAIN_SUNRGBD_SEG = REL + '/datasets/sun_nyu2/sunrgbd_train_seg.txt'
+TEST_SUNRGBD_SEG = REL + '/datasets/sun_nyu2/sunrgbd_test_seg.txt'
 
 MAPPING = { 
             
@@ -82,10 +88,10 @@ MAPPING = {
             34	:	7,
             35	:	7,
             36	:	7,
-            37	:	7,
-            38	:	7,
-            39	:	6,
-            40	:	7,
+            37	:	7
+            #38	:	7,
+            #39	:	6,
+            #40	:	7,
        }
 
 class EarlyStopping:
@@ -168,6 +174,110 @@ class ConfMatrix(object):
         iu = torch.diag(h) / (h.sum(1) + h.sum(0) - torch.diag(h))
         return torch.mean(iu), acc
 
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def multitask_transformation(task, image, label, depth):
+    """
+    applies transformations on input images and their labels
+    """
+    if task == "surface_normal":
+        
+        image = torchvision.transforms.ToTensor()(image)
+        label = torch.from_numpy(np.array(label)/255.).type(torch.float32)  
+        depth = torch.from_numpy(np.array(depth)).type(torch.float32)
+        
+    elif task == "vanishing_point":
+        
+        image = torchvision.transforms.ToTensor()(image)  
+        label = torch.Tensor(label)
+        label = label.type(torch.float32)
+        depth = torch.from_numpy(np.array(depth)/255.).type(torch.float32)
+    
+    elif task == "segmentation":
+        
+        image = torchvision.transforms.ToTensor()(image)
+        label = torch.from_numpy(np.array(label)).type(torch.LongTensor)
+        label = torch.squeeze(label,1)
+        depth = torch.from_numpy(np.array(depth)/255.).type(torch.float32)
+    
+    return image, label, depth
+
+def get_multitask_data_loader(task, data, label, depth,  flag, batch_size):
+    """
+    returns train/test/val dataloaders
+    params: flag - train/test/val
+            task - segmentation, surface_normal, vanishing_point
+            batch_size - batch_size of the dataset
+            data, label - dataset with its ground truth label
+    """
+
+    dataset = Multitask_DatasetLoader(task,  data[flag], label[flag], depth[flag], transform=multitask_transformation) 
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size = batch_size, shuffle=True, num_workers=4)
+
+    return dataloader
+
+class Multitask_DatasetLoader(Dataset):
+    
+    def __init__(self, task, data, label, depth, transform = None):
+        self.data = data
+        self.label = label
+        self.depth = depth
+        self.length = len(data)
+        self.transform = transform
+        self.task = task
+
+    def __len__(self):
+        return self.length
+  
+    def __getitem__(self, idx):
+        
+        image = Image.open(self.data[idx])
+        image = image.resize(IMG_SIZE, Image.BILINEAR)
+        
+        if self.task == "segmentation":
+            lab = np.array(Image.open(self.label[idx]))
+            palette = list(MAPPING.keys())
+            key = np.array(list(MAPPING.values()))
+            index = np.digitize(lab.ravel(), palette, right=True)
+            new_img = np.array(key[index].reshape(lab.shape)).astype(np.uint8)
+            label = Image.fromarray(new_img)
+            label = label.resize(IMG_SIZE, Image.NEAREST)
+            # depth
+            depth = Image.fromarray(np.uint8(np.array(Image.open(self.depth[idx]))/256))
+            depth = depth.resize(IMG_SIZE, Image.BILINEAR)
+        
+        elif self.task == "surface_normal":
+            lab = np.nan_to_num(np.load(self.label[idx])) 
+            lab = np.array(lab*255, dtype=np.float64)
+            label = Image.fromarray(lab.astype(np.uint8))
+            label = np.array(label.resize(IMG_SIZE, Image.NEAREST)).transpose(2, 0, 1)
+            norm = np.load(self.depth[idx])
+            norm = np.reshape(norm, (norm.shape[0], norm.shape[1]))
+            depth = Image.fromarray(norm/331.08224)
+            depth = depth.resize(IMG_SIZE, Image.BILINEAR)
+            
+        elif self.task == "vanishing_point":
+            label = []
+            vps = np.load(self.label[idx])
+            label.append(vps['x'][0])
+            label.append(vps['y'][0])
+            label.append(vps['z'][0])
+            label.append(vps['x'][1])
+            label.append(vps['y'][1])
+            label.append(vps['z'][1])
+            label.append(vps['x'][2])
+            label.append(vps['y'][2])
+            label.append(vps['z'][2])
+            depth = Image.open(self.depth[idx])
+            depth = depth.resize(IMG_SIZE, Image.BILINEAR)
+        
+            
+        if self.transform:
+            image, label, depth = self.transform(self.task, image, label, depth)
+            
+        return image, label, depth
+
+# -------------------------------------------------------------------------------------------------------------------------------
 
 # transformations  
 
@@ -180,20 +290,12 @@ def train_transformation(task, image, label):
     if task == "surface_normal":
         
         image = torchvision.transforms.ToTensor()(image)
-        label = torchvision.transforms.ToTensor()(label)        
-        label = label.type(torch.float32)
+        label = torch.from_numpy(np.array(label)/255.).type(torch.float32)       
     
     elif task == "depth":
-        if p <= 0.5 :
-            img_out = image.transpose(Image.FLIP_LEFT_RIGHT)
-            image = torchvision.transforms.ToTensor()(img_out)
-            label = np.array(label.transpose(Image.FLIP_LEFT_RIGHT))/255.
-            label = torch.from_numpy(label).type(torch.float32) 
-        else:
-            image = torchvision.transforms.ToTensor()(image)
-            label = torch.from_numpy(np.array(label)/255.).type(torch.float32)    
-            
-#         label = torch.unsqueeze(label,0)
+        image = torchvision.transforms.ToTensor()(image)
+        label = torch.from_numpy(np.array(label)/255.).type(torch.float32)   
+      
 
     elif task == "vanishing_point":
         
@@ -206,32 +308,16 @@ def train_transformation(task, image, label):
             img_out = image.transpose(Image.FLIP_LEFT_RIGHT)
             image = torchvision.transforms.ToTensor()(img_out)
             label = label.transpose(Image.FLIP_LEFT_RIGHT)
-            label = torch.tensor(np.array(label)).type(torch.LongTensor)
-            label = torch.squeeze(label,1)
-        else:
-            image = torchvision.transforms.ToTensor()(image)
-            label = torch.tensor(np.array(label)).type(torch.LongTensor)
-            label = torch.squeeze(label,1)
-            
-    elif task == "segmentation_depth":
-        
-        if p <= 0.5 :
-            img_out = image.transpose(Image.FLIP_LEFT_RIGHT)
-            image = torchvision.transforms.ToTensor()(img_out)
-            label = np.array(label.transpose(Image.FLIP_LEFT_RIGHT))
-            label = torch.from_numpy(label).type(torch.LongTensor)
-            label = torch.squeeze(label,1)
-
-        else:
-            image = torchvision.transforms.ToTensor()(image)
             label = torch.from_numpy(np.array(label)).type(torch.LongTensor)
             label = torch.squeeze(label,1)
+        else:
+            image = torchvision.transforms.ToTensor()(image)
+            label = torch.tensor(np.array(label)).type(torch.LongTensor)
+            label = torch.squeeze(label,1)
+
             
     return image, label
 
-def convert_I_to_L(img):
-    array = np.uint8(np.array(img)/ 256)
-    return Image.fromarray(array)
 
 def test_transformation(task, image, label):
     """
@@ -240,15 +326,7 @@ def test_transformation(task, image, label):
     if task == "surface_normal":
         
         image = torchvision.transforms.ToTensor()(image)
-        label = torchvision.transforms.ToTensor()(label)        
-        label = label.type(torch.float32)
-        
-    elif task == "depth":
-        image = torchvision.transforms.ToTensor()(image)
-#         label = torchvision.transforms.ToTensor()(label)        
-        label = torch.from_numpy(np.array(label)/255.).type(torch.float32)
-#         label = torch.unsqueeze(label,0)
-#         label = label.type(torch.float32)
+        label = torch.from_numpy(np.array(label)/255.).type(torch.float32) 
         
     elif task == "vanishing_point":
         
@@ -256,6 +334,12 @@ def test_transformation(task, image, label):
         label = torch.Tensor(label)
         label = label.type(torch.float32)
     
+    elif task == "depth":
+
+        image = torchvision.transforms.ToTensor()(image)
+        label = torch.from_numpy(np.array(label)/255.).type(torch.float32)   
+      
+
     elif task == "segmentation":
         
         image = torchvision.transforms.ToTensor()(image)
@@ -264,6 +348,64 @@ def test_transformation(task, image, label):
         
     return image, label
 
+class DatasetLoader(Dataset):
+    
+    def __init__(self, task, data, label, transform = None):
+        self.data = data
+        self.label = label
+        self.length = len(data)
+        self.transform = transform
+        self.task = task
+
+    def __len__(self):
+        return self.length
+  
+    def __getitem__(self, idx):
+        
+        image = Image.open(self.data[idx])
+        image = image.resize(IMG_SIZE, Image.BILINEAR)
+        
+        if self.task == "segmentation":
+            lab = np.array(Image.open(self.label[idx]))
+            palette = list(MAPPING.keys())
+            key = np.array(list(MAPPING.values()))
+            index = np.digitize(lab.ravel(), palette, right=True)
+            new_img = np.array(key[index].reshape(lab.shape)).astype(np.uint8)
+            label = Image.fromarray(new_img)
+            label = label.resize(IMG_SIZE, Image.NEAREST)
+                 
+        elif self.task == "surface_normal":
+            lab = np.load(self.label[idx])
+            label = Image.fromarray(np.uint8(lab*255))
+            label = np.array(label.resize(IMG_SIZE, Image.BILINEAR)).transpose(2, 0, 1)
+        
+        elif self.task == "depth":
+            
+            # lab = Image.open(self.label[idx])
+            # label = Image.fromarray(np.uint8((np.array(lab)/256)))
+            # label = label.resize(IMG_SIZE, Image.NEAREST)
+            norm = np.load(self.label[idx])
+            norm = np.reshape(norm, (norm.shape[0], norm.shape[1]))
+            label = Image.fromarray(norm/331.08224)
+            label = label.resize(IMG_SIZE, Image.NEAREST)
+
+        elif self.task == "vanishing_point":
+            label = []
+            vps = np.load(self.label[idx])
+            label.append(vps['x'][0])
+            label.append(vps['y'][0])
+            label.append(vps['z'][0])
+            label.append(vps['x'][1])
+            label.append(vps['y'][1])
+            label.append(vps['z'][1])
+            label.append(vps['x'][2])
+            label.append(vps['y'][2])
+            label.append(vps['z'][2])
+    
+        if self.transform:
+            image, label = self.transform(self.task, image, label)
+            
+        return image, label
 
 def get_data_loader(task, data, label, flag, batch_size):
     """
@@ -284,69 +426,7 @@ def get_data_loader(task, data, label, flag, batch_size):
 
     return dataloader
 
-# DataLoader class
-class DatasetLoader(Dataset):
-    
-    def __init__(self, task, data, label, transform = None):
-        self.data = data
-        self.label = label
-        self.length = len(data)
-        self.transform = transform
-        self.task = task
-
-    def __len__(self):
-        return self.length
-  
-    def __getitem__(self, idx):
-        
-        image = Image.open(self.data[idx])
-        image = image.resize(IMG_SIZE, Image.BILINEAR)
-        
-        if self.task == "segmentation":
-            label = Image.open(self.label[idx])
-            label = label.resize(IMG_SIZE, Image.NEAREST)
-            
-        elif self.task == "segmentation_depth":
-            mat = io.loadmat(self.label[idx])
-            mat = mat['seglabel']
-            mat[mat>40] = 0
-            palette = list(MAPPING.keys())
-            # key gives the new values you wish palette to be mapped to.
-            key = np.array(list(MAPPING.values()))
-            index = np.digitize(mat.ravel(), palette, right=True)
-            new_img = np.array(key[index].reshape(mat.shape)).astype(np.uint8)
-            label = Image.fromarray(new_img)
-            label = label.resize(IMG_SIZE, Image.NEAREST)
-        
-        elif self.task == "surface_normal":
-            lab = np.array(np.load(self.label[idx]), dtype=np.float32)*255
-            label = Image.fromarray(lab.astype(np.uint8))
-            label = label.resize(IMG_SIZE, Image.NEAREST)
-        
-        elif self.task == "vanishing_point":
-            label = []
-            vps = np.load(self.label[idx])
-            label.append(vps['x'][0])
-            label.append(vps['y'][0])
-            label.append(vps['z'][0])
-            label.append(vps['x'][1])
-            label.append(vps['y'][1])
-            label.append(vps['z'][1])
-            label.append(vps['x'][2])
-            label.append(vps['y'][2])
-            label.append(vps['z'][2])
-
-            
-        elif self.task == "depth":
-            label = Image.fromarray(np.uint8(np.array(Image.open(self.label[idx]))/256))
-            label = label.resize(IMG_SIZE, Image.NEAREST)
-            
-        if self.transform:
-            image, label = self.transform(self.task, image, label)
-            
-            
-        return image, label
-    
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def draw_training_curves(train_losses, test_losses, curve_name, task, timestr):
     """
@@ -359,9 +439,9 @@ def draw_training_curves(train_losses, test_losses, curve_name, task, timestr):
     plt.plot(train_losses, label='Training {}'.format(curve_name))
     plt.plot(test_losses, label='Testing {}'.format(curve_name))
     plt.legend(frameon=False)
-#     os.makedirs(VIS_RESULTS_PATH+task+'/'+timestr)
     plt.savefig(VIS_RESULTS_PATH+task+'/'+timestr+"/{}_curves.png".format(curve_name))
     
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Load datasets
 
@@ -374,40 +454,49 @@ def load_diode_sn_dataset():
     
     data = {}
     label = {}
+    depth = {}
     
     train_images = []
-    test_images = []
+    val_images = []
     train_normals = []
-    test_normals = []
-
+    val_normals = []
+    train_depth = []
+    val_depth = []
+    
     for filename in glob.iglob(TRAIN_DIODE + '/**/*normal.npy', recursive=True):
         path = filename[:-11] + ".png"
+        dep = filename[:-11] + "_depth.npy"
         train_images.append(path)
         train_normals.append(filename)
+        train_depth.append(dep)
 
     for filename in glob.iglob(TEST_DIODE + '/**/*normal.npy', recursive=True):
         path = filename[:-11] + ".png"
-        test_images.append(path)
-        test_normals.append(filename)
+        dep = filename[:-11] + "_depth.npy"
+        val_images.append(path)
+        val_normals.append(filename)
+        val_depth.append(dep)
     
     index = np.random.permutation(len(train_images))
+
+    data['train'] = np.array(train_images)[index][:7000]
+    label['train'] = np.array(train_normals)[index][:7000]
+    depth['train'] = np.array(train_depth)[index][:7000]
     
-    train_images = np.array(train_images)[index]
-    train_normals = np.array(train_normals)[index]
+    data['val'] = val_images
+    label['val'] = val_normals
+    depth['val'] = val_depth
     
-    data['train'] = train_images[:5000]
-    label['train'] = train_normals[:5000]
-    data['val'] = train_images[10000:10500]
-    label['val'] = train_normals[10000:10500]
-    data['test'] = test_images
-    label['test'] = test_normals
+    print("Size of train images : ", len(data['train']))
+    print("Size of val images : ", len(data['val']))
     
-    print("length of training data: ",len(data['train']))
-    print("length of validation data: ",len(data['val']))
-    print("length of testing data: ",len(data['test']))
+    print("Size of train depth : ", len(depth['train']))
+    print("Size of val depth : ", len(depth['val']))
     
+    print("Size of train Surface normal : ", len(label['train']))
+    print("Size of val Surface normal : ", len(label['val']))
     
-    return data, label
+    return data, label, depth
 
 
 
@@ -456,110 +545,116 @@ def load_nyuv2_dataset(flag):
 
 
 # 3. Load scannet vanishing points dataset
-def Extract(lst):
-    return [item[0] for item in lst]
+
 
 def load_scannet_vp_dataset():
     """
     returns training and validation images and their corresponding vanishing points labels.
     """
-    data = {}
-    label = {}
 
-    lst = os.listdir(PATH_SCANNET_VP_TRAIN)
+    data_image = {'train':[], 'test':[], 'val': []}
+    vanish_point = {'train':[], 'test':[], 'val': []}
+    vanish_depth = {'train':[], 'test':[], 'val': []}
 
-    final_images = []
-    final_vpoints = []
-    lst= lst[1:]
-    
-    for folder in lst:
-        images = glob.glob(PATH_SCANNET_VP_TRAIN+folder+"/*color.png")
-        vpoints = glob.glob(PATH_SCANNET_VP_TRAIN+folder+"/*vanish.npz")
-        images = np.array_split(images, 25)
-        vpoints = np.array_split(vpoints, 25)
+    def sort_images(temp):
+        sortedimages = sorted(temp, key=lambda x: int(re.findall(r'\d+', x)[-1]))
+        return sortedimages
 
-        final_images.extend(Extract(images))
-        final_vpoints.extend(Extract(vpoints))
-    
-    index = np.random.permutation(len(final_images))
-    final_images = np.array(final_images)[index]
-    final_vpoints = np.array(final_vpoints)[index]
-    
-    val = int(len(final_images)*0.8)
-    test = int(len(final_images)*0.9)
-    
-    data['train'], data['val'], data['test'] = final_images[:val], final_images[val:test], final_images[test:]
-    label['train'], label['val'], label['test'] = final_vpoints[:val], final_vpoints[val:test], final_vpoints[test:]
-    
-    print("length of training data: ",len(data['train']))
-    print("length of validation data: ",len(data['val']))
-    print("length of testing data: ",len(data['test']))
-    
-    return data, label
+    def get_vp_dataset(path, dtype):
+
+        folders = os.listdir(path)
+        main_images = []
+        vanishing_points = []
+        vanishing_depth = []
+        
+        for scene in folders:
+            images = glob.glob(path + scene + '/*color.png')
+            vanish = glob.glob(path + scene + '/*vanish.npz')
+            depth = glob.glob(path + scene + '/[!frame]*.png')
+            
+            main_images.extend(sort_images(images))
+            vanishing_points.extend(sort_images(vanish))
+            vanishing_depth.extend(sort_images(depth))
+            
+
+        data_image[dtype] = main_images
+        vanish_point[dtype] = vanishing_points
+        vanish_depth[dtype] = vanishing_depth
+
+        return
+
+    get_vp_dataset(TRAIN_VP, 'train')
+    get_vp_dataset(VAL_VP, 'val')
+    get_vp_dataset(TEST_VP, 'test')   
+
+
+    print("Length of train data: ",len(data_image['train']))
+    print("Length of val data: ",len(data_image['val']))
+    print("Length of test data: ",len(data_image['test']))
+
+    print("Length of train vp: ",len(vanish_point['train']))
+    print("Length of val vp: ",len(vanish_point['val']))
+    print("Length of test vp: ",len(vanish_point['test']))
+
+    print("Length of train depth: ",len(vanish_depth['train']))
+    print("Length of val depth: ",len(vanish_depth['val']))
+    print("Length of test depth: ",len(vanish_depth['test']))
+
+    return data_image, vanish_point, vanish_depth
 
 
 # 4. Load SUNRGBD dataset
 
-def load_sunrgbd_dataset_original():
-    """
-    returns a dictionary of train, test and validation images and their corresponding segmentation/depth maps
-    """
-    Image = {}
-    Depth = {}
-    Seg = {}
-    
-    images = []
-    depth = []
-    seg = []
-        
-    for filename in glob.iglob(SUNRGBD_REL_PATH + '**/image/*.jpg', recursive=True):
-        images.append(filename)
-
-    for filename in glob.iglob(SUNRGBD_REL_PATH + '**/depth/*.png', recursive=True):
-        depth.append(filename)
-    
-    for filename in glob.iglob(SUNRGBD_REL_PATH + '**/seg.mat', recursive=True):
-        seg.append(filename)
-    
-    index = np.random.permutation(len(images))
-
-    images = np.array(images)[index]
-    depth = np.array(depth)[index]
-    seg = np.array(seg)[index]
-    
-    train = int(len(images)*0.8)
-    val = int(len(images)*0.9)
-    
-    Image["train"], Image["val"], Image["test"] = images[:train], images[train:val], images[val:]
-    Depth["train"], Depth["val"], Depth["test"] = depth[:train], depth[train:val], depth[val:]
-    Seg["train"], Seg["val"], Seg["test"] = seg[:train], seg[train:val], seg[val:]
-    
-    return Image, Depth, Seg
-
 def load_sunrgbd_dataset():
     """
-    load dataset from pre-split data 5k train and 5k test
+    loads sunrgbd dataset rgb images with their corresponding segmentation and depth images.
     """
-    data, label = {}, {}
-    
-    train = glob.glob(PATH_SUNRGBD_TRAIN+'*.jpg')
-    lab = glob.glob(PATH_SUNRGBD_TRAIN_LABEL+'*.png')
-    data["train"] = sorted(train, key=lambda x: re.findall(r"\d+",x)[1])
-    label["train"] = sorted(lab, key=lambda x: re.findall(r"\d+",x)[-1])
-    
-    test = glob.glob(PATH_SUNRGBD_TEST+'*.jpg')
-    lab = glob.glob(PATH_SUNRGBD_TEST_LABEL+'*.png')
-    test = sorted(test, key=lambda x: re.findall(r"\d+",x)[1])
-    lab = sorted(lab, key=lambda x: re.findall(r"\d+",x)[-1])
-    
-    data["val"] = test[:2000]
-    label["val"] = lab[:2000]
-    data["test"] = test[2000:]
-    label["test"] = lab[2000:]
-    
-    return data, label
+    img = []
+    segm = []
+    dep = []
+    images = {'train':[], 'val':[]}
+    depth = {'train':[], 'val':[]}
+    seg = {'train':[], 'val':[]} 
 
+    with open(TRAIN_SUNRGBD_IMAGES, 'r') as f:
+        for line in f:
+            img.append(os.path.join(REL, line.strip('\n')))
 
-    
-    
- 
+    with open(TEST_SUNRGBD_IMAGES, 'r') as f:
+        for line in f:
+            img.append(os.path.join(REL, line.strip('\n')))
+
+    with open(TRAIN_SUNRGBD_DEPTH, 'r') as f:
+        for line in f:
+            dep.append(os.path.join(REL, line.strip('\n')))
+
+    with open(TEST_SUNRGBD_DEPTH, 'r') as f:
+        for line in f:
+            dep.append(os.path.join(REL, line.strip('\n')))
+
+    with open(TRAIN_SUNRGBD_SEG, 'r') as f:
+        for line in f:
+            segm.append(os.path.join(REL, line.strip('\n')))
+            
+    with open(TEST_SUNRGBD_SEG, 'r') as f:
+        for line in f:
+            segm.append(os.path.join(REL, line.strip('\n')))
+
+    index = np.random.permutation(len(img))
+    final_img = np.array(img)[index]
+    final_dep = np.array(dep)[index]
+    final_seg = np.array(segm)[index]
+    val = int(len(final_img)*0.8)
+
+    images['train'], images['val'] = final_img[:val], final_img[val:]
+    depth['train'], depth['val'] = final_dep[:val], final_dep[val:]
+    seg['train'], seg['val'] = final_seg[:val], final_seg[val:]
+
+    print("Size of training data : ", len(images['train']))
+    print("Size of validation data : ", len(images['val']))
+
+    return images, seg, depth
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# VP and Seg igpu 21

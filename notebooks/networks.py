@@ -4,10 +4,7 @@ import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
-
-#------------------------------------------------------------------------------------------------------------------------------
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from torchsummary import summary
 
 #------------------------------------------------------------------------------------------------------------------------------
 
@@ -29,7 +26,20 @@ class SegNet(nn.Module):
         self.vgg16 = torchvision.models.vgg16(pretrained=True)
 
         # Encoder layers
-
+        self.head = nn.Sequential(
+                    nn.Flatten(),
+                    nn.Linear(55296, 2048),
+                    nn.BatchNorm1d(2048),
+                    nn.ReLU(),
+                    nn.Dropout(0.4),
+                    nn.Linear(2048, 1024),
+                    nn.BatchNorm1d(1024),
+                    nn.ReLU(),
+                    nn.Dropout(0.4),
+                    nn.Linear(1024, 9),
+                    nn.BatchNorm1d(9),
+                )
+                
         self.encoder_conv_00 = nn.Sequential(*[
                                                 nn.Conv2d(in_channels=self.input_channels,
                                                           out_channels=64,
@@ -219,8 +229,19 @@ class SegNet(nn.Module):
                                                 
                                                ])
 
+        self.decoder_convtr_depth = nn.Sequential(*[
+                                                nn.ConvTranspose2d(in_channels=64,
+                                                                   out_channels=1,
+                                                                   kernel_size=3,
+                                                                   padding=1),
+                                                nn.BatchNorm2d(1)
+                                                
+                                               ])
 
-    def forward(self, input_img):
+        
+
+
+    def forward(self, task, multitask, input_img):
         """
         Forward pass `input_img` through the network
         """
@@ -260,42 +281,88 @@ class SegNet(nn.Module):
         x_42 = F.relu(self.encoder_conv_42(x_41))
         encoder_op, indices_4 = F.max_pool2d(x_42, kernel_size=2, stride=2, return_indices=True)
 
-        # Decoder
+        if task == 'vanishing_point':
+            decoder_op = self.head(encoder_op)
 
-        dim_d = encoder_op.size()
+        else:
+            # Decoder
+            dim_d = encoder_op.size()
 
-        # Decoder Stage - 5
-        x_4d = F.max_unpool2d(encoder_op, indices_4, kernel_size=2, stride=2, output_size=dim_4)
-        x_42d = F.relu(self.decoder_convtr_42(x_4d))
-        x_41d = F.relu(self.decoder_convtr_41(x_42d))
-        x_40d = F.relu(self.decoder_convtr_40(x_41d))
-        dim_4d = x_40d.size()
 
-        # Decoder Stage - 4
-        x_3d = F.max_unpool2d(x_40d, indices_3, kernel_size=2, stride=2, output_size=dim_3)
-        x_32d = F.relu(self.decoder_convtr_32(x_3d))
-        x_31d = F.relu(self.decoder_convtr_31(x_32d))
-        x_30d = F.relu(self.decoder_convtr_30(x_31d))
-        dim_3d = x_30d.size()
+            # Decoder Stage - 5
+            x_4d = F.max_unpool2d(encoder_op, indices_4, kernel_size=2, stride=2, output_size=dim_4)
+            x_42d = F.relu(self.decoder_convtr_42(x_4d))
+            x_41d = F.relu(self.decoder_convtr_41(x_42d))
+            x_40d = F.relu(self.decoder_convtr_40(x_41d))
+            dim_4d = x_40d.size()
 
-        # Decoder Stage - 3
-        x_2d = F.max_unpool2d(x_30d, indices_2, kernel_size=2, stride=2, output_size=dim_2)
-        x_22d = F.relu(self.decoder_convtr_22(x_2d))
-        x_21d = F.relu(self.decoder_convtr_21(x_22d))
-        x_20d = F.relu(self.decoder_convtr_20(x_21d))
-        dim_2d = x_20d.size()
+            # Decoder Stage - 4
+            x_3d = F.max_unpool2d(x_40d, indices_3, kernel_size=2, stride=2, output_size=dim_3)
+            x_32d = F.relu(self.decoder_convtr_32(x_3d))
+            x_31d = F.relu(self.decoder_convtr_31(x_32d))
+            x_30d = F.relu(self.decoder_convtr_30(x_31d))
+            dim_3d = x_30d.size()
 
-        # Decoder Stage - 2
-        x_1d = F.max_unpool2d(x_20d, indices_1, kernel_size=2, stride=2, output_size=dim_1)
-        x_11d = F.relu(self.decoder_convtr_11(x_1d))
-        x_10d = F.relu(self.decoder_convtr_10(x_11d))
-        dim_1d = x_10d.size()
+            # Decoder Stage - 3
+            x_2d = F.max_unpool2d(x_30d, indices_2, kernel_size=2, stride=2, output_size=dim_2)
+            x_22d = F.relu(self.decoder_convtr_22(x_2d))
+            x_21d = F.relu(self.decoder_convtr_21(x_22d))
+            x_20d = F.relu(self.decoder_convtr_20(x_21d))
+            dim_2d = x_20d.size()
 
-        # Decoder Stage - 1
-        x_0d = F.max_unpool2d(x_10d, indices_0, kernel_size=2, stride=2, output_size=dim_0)
-        x_01d = F.relu(self.decoder_convtr_01(x_0d))
-        decoder_op = F.relu(self.decoder_convtr_00(x_01d))
-        
+            # Decoder Stage - 2
+            x_1d = F.max_unpool2d(x_20d, indices_1, kernel_size=2, stride=2, output_size=dim_1)
+            x_11d = F.relu(self.decoder_convtr_11(x_1d))
+            x_10d = F.relu(self.decoder_convtr_10(x_11d))
+            dim_1d = x_10d.size()
+
+            # Decoder Stage - 1
+            x_0d = F.max_unpool2d(x_10d, indices_0, kernel_size=2, stride=2, output_size=dim_0)
+            x_01d = F.relu(self.decoder_convtr_01(x_0d))
+            if task == "surface_normal":
+                decoder_op = torch.sigmoid(self.decoder_convtr_00(x_01d))
+            elif task == "depth":
+                decoder_op = torch.sigmoid(self.decoder_convtr_00(x_01d))
+            else:    
+                decoder_op = F.relu(self.decoder_convtr_00(x_01d))
+            
+            if multitask:
+                
+                # Decoder Stage - 5
+                dep_x_4d = F.max_unpool2d(encoder_op, indices_4, kernel_size=2, stride=2, output_size=dim_4)
+                dep_x_42d = F.relu(self.decoder_convtr_42(dep_x_4d))
+                dep_x_41d = F.relu(self.decoder_convtr_41(dep_x_42d))
+                dep_x_40d = F.relu(self.decoder_convtr_40(dep_x_41d))
+                dim_4d = dep_x_40d.size()
+
+                # Decoder Stage - 4
+                dep_x_3d = F.max_unpool2d(dep_x_40d, indices_3, kernel_size=2, stride=2, output_size=dim_3)
+                dep_x_32d = F.relu(self.decoder_convtr_32(dep_x_3d))
+                dep_x_31d = F.relu(self.decoder_convtr_31(dep_x_32d))
+                dep_x_30d = F.relu(self.decoder_convtr_30(dep_x_31d))
+                dim_3d = dep_x_30d.size()
+
+                # Decoder Stage - 3
+                dep_x_2d = F.max_unpool2d(dep_x_30d, indices_2, kernel_size=2, stride=2, output_size=dim_2)
+                dep_x_22d = F.relu(self.decoder_convtr_22(dep_x_2d))
+                dep_x_21d = F.relu(self.decoder_convtr_21(dep_x_22d))
+                dep_x_20d = F.relu(self.decoder_convtr_20(dep_x_21d))
+                dim_2d = dep_x_20d.size()
+
+                # Decoder Stage - 2
+                dep_x_1d = F.max_unpool2d(dep_x_20d, indices_1, kernel_size=2, stride=2, output_size=dim_1)
+                dep_x_11d = F.relu(self.decoder_convtr_11(dep_x_1d))
+                dep_x_10d = F.relu(self.decoder_convtr_10(dep_x_11d))
+                dim_1d = dep_x_10d.size()
+
+                # Decoder Stage - 1
+                dep_x_0d = F.max_unpool2d(dep_x_10d, indices_0, kernel_size=2, stride=2, output_size=dim_0)
+                dep_x_01d = F.relu(self.decoder_convtr_01(dep_x_0d))
+                decoder_depth = torch.sigmoid(self.decoder_convtr_depth(dep_x_01d))
+
+                return decoder_op, decoder_depth
+
+
 
         return decoder_op
 
@@ -375,28 +442,28 @@ class VGG16Model(nn.Module):
     def __init__(self):
         super(VGG16Model,self).__init__()
     
-        self.vgg16 = torchvision.models.vgg16(pretrained=True)
+        self.vgg16 = torchvision.models.vgg16_bn(pretrained=True)
         self.vgg16 = self.vgg16.features
 
-        for params in self.vgg16.parameters():
-            params.requires_grad = False
+#         for params in self.vgg16.parameters():
+#             params.requires_grad = False
 
         self.head = nn.Sequential(
                     nn.Flatten(),
-                    nn.Linear(55296, 4096),
-                    nn.BatchNorm1d(4096),
+                    nn.Linear(55296, 2048),
+                    nn.BatchNorm1d(2048),
                     nn.ReLU(),
-                    nn.Dropout(0.3),
-                    nn.Linear(4096, 1024),
+                    nn.Dropout(0.4),
+                    nn.Linear(2048, 1024),
                     nn.BatchNorm1d(1024),
                     nn.ReLU(),
-                    nn.Dropout(0.3),
+                    nn.Dropout(0.4),
                     nn.Linear(1024, 9),
                     nn.BatchNorm1d(9),
                     nn.Sigmoid()
                 )
     
-    def forward(self, image):
+    def forward(self, task, multitask, image):
         
         features = self.vgg16(image)
         scores = self.head(features)
