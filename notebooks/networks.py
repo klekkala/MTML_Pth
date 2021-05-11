@@ -25,7 +25,7 @@ class SegNet(nn.Module):
 
         self.vgg16 = torchvision.models.vgg16(pretrained=True)
 
-        # Encoder layers
+        # This is the decoder for vanishing points since it has 9 points as the output.
         self.head = nn.Sequential(
                     nn.Flatten(),
                     nn.Linear(55296, 2048),
@@ -40,6 +40,10 @@ class SegNet(nn.Module):
                     nn.BatchNorm1d(9),
                 )
                 
+        #------------------------------------------------------------------------------------------------------------------------------
+
+        # Encoder blocks
+
         self.encoder_conv_00 = nn.Sequential(*[
                                                 nn.Conv2d(in_channels=self.input_channels,
                                                           out_channels=64,
@@ -131,10 +135,13 @@ class SegNet(nn.Module):
                                                           padding=1),
                                                 nn.BatchNorm2d(512)
                                                 ])
-
+        #------------------------------------------------------------------------------------------------------------------------------
+        # This initializes the weights of the encoder
         self.init_vgg_weigts()
 
-        # Decoder layers
+        #------------------------------------------------------------------------------------------------------------------------------
+
+        # Decoder layers blocks in reverse order of the encoder. 
 
         self.decoder_convtr_42 = nn.Sequential(*[
                                                 nn.ConvTranspose2d(in_channels=512,
@@ -239,15 +246,16 @@ class SegNet(nn.Module):
                                                ])
 
         
-
+        #------------------------------------------------------------------------------------------------------------------------------
 
     def forward(self, task, multitask, input_img):
         """
         Forward pass `input_img` through the network
         """
 
-        # Encoder
+        # Build the Encoder using the above blocks of encoder:
 
+        #------------------------------------------------------------------------------------------------------------------------------
         # Encoder Stage - 1
         dim_0 = input_img.size()
         x_00 = F.relu(self.encoder_conv_00(input_img))
@@ -281,13 +289,22 @@ class SegNet(nn.Module):
         x_42 = F.relu(self.encoder_conv_42(x_41))
         encoder_op, indices_4 = F.max_pool2d(x_42, kernel_size=2, stride=2, return_indices=True)
 
-      
+        # encoder_op is the output of the encoder which is given as an input to the decoders
+
+        #------------------------------------------------------------------------------------------------------------------------------
+
+
         # Decoder
         dim_d = encoder_op.size()
 
         if task == "vanishing_point_depth" or task == 'vanishing_point':
+            # if the task is predicting vanishing points or multitask - vanishing point and depth then the decoder is self.head as mentioned in the constructor
             decoder_op = self.head(encoder_op)
+
         else:
+            # Else for other tasks the decoder architecture is the same. The only difference is in the output layer of decoder
+
+            #------------------------------------------------------------------------------------------------------------------------------
             # Decoder Stage - 5
             x_4d = F.max_unpool2d(encoder_op, indices_4, kernel_size=2, stride=2, output_size=dim_4)
             x_42d = F.relu(self.decoder_convtr_42(x_4d))
@@ -318,14 +335,21 @@ class SegNet(nn.Module):
             # Decoder Stage - 1
             x_0d = F.max_unpool2d(x_10d, indices_0, kernel_size=2, stride=2, output_size=dim_0)
             x_01d = F.relu(self.decoder_convtr_01(x_0d))
-            
+            #------------------------------------------------------------------------------------------------------------------------------
+            # Now we handle the last layer of decoder here
+
             if task == "surface_normal" or task == 'surface_normal_depth':
+                # for surface normal we need values from -1 to 1 hence we have used a tanh activation function
                 decoder_op = torch.tanh(self.decoder_convtr_00(x_01d))
             else:    
+                # for other tasks, we need positive values hence relu is used
                 decoder_op = F.relu(self.decoder_convtr_00(x_01d))
             
+        #------------------------------------------------------------------------------------------------------------------------------    
         if multitask:
             
+            # if we are performing multi-task training, as in Seg-depth, SN-depth or VP-depth then this block initialises decoder for depth
+
             # Decoder Stage - 5
             dep_x_4d = F.max_unpool2d(encoder_op, indices_4, kernel_size=2, stride=2, output_size=dim_4)
             dep_x_42d = F.relu(self.decoder_convtr_42(dep_x_4d))
@@ -358,13 +382,16 @@ class SegNet(nn.Module):
             dep_x_01d = F.relu(self.decoder_convtr_01(dep_x_0d))
             decoder_depth = torch.sigmoid(self.decoder_convtr_depth(dep_x_01d))
 
+            #------------------------------------------------------------------------------------------------------------------------------
+            # Here we return the output of the task decoder and depth decoder respectively
             return decoder_op, decoder_depth
 
-
+        # if we arent solving a multitask problem, we just return the output of task decoder.
         return decoder_op
 
 
     def init_vgg_weigts(self):
+        # This function assigns weights to the encoders.
         assert self.encoder_conv_00[0].weight.size() == self.vgg16.features[0].weight.size()
         self.encoder_conv_00[0].weight.data = self.vgg16.features[0].weight.data
         assert self.encoder_conv_00[0].bias.size() == self.vgg16.features[0].bias.size()
