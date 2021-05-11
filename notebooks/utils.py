@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import torch.nn as nn
 from scipy import io
 import time
+import random
 timestr = time.strftime("%Y%m%d-%H%M%S")
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -24,9 +25,8 @@ VIS_RESULTS_PATH = REL + '/results/'
 
 # paths to datasets
 # diode
-PATH_DIODE = '/drive/diode/'
-TRAIN_DIODE = PATH_DIODE + 'train'
-TEST_DIODE = PATH_DIODE + 'val'
+SN_TRAIN = REL + '/datasets/diode_dataset/train/'
+SN_VAL = REL + '/datasets/diode_dataset/val/'
 
 # NYUv2
 TRAIN_NYU_RGB_PATH = REL + "/datasets/nyuv2/train_rgb/"
@@ -42,12 +42,24 @@ VAL_VP = REL + '/datasets/scannet_vp/val/'
 TEST_VP = REL + '/datasets/scannet_vp/test/'
 
 #SUNRGBD
-TRAIN_SUNRGBD_IMAGES = REL + '/datasets/sun_nyu2/sunrgbd_train_images.txt'
-TEST_SUNRGBD_IMAGES = REL + '/datasets/sun_nyu2/sunrgbd_test_images.txt'
-TRAIN_SUNRGBD_DEPTH = REL + '/datasets/sun_nyu2/sunrgbd_train_depth.txt'
-TEST_SUNRGBD_DEPTH = REL + '/datasets/sun_nyu2/sunrgbd_test_depth.txt'
-TRAIN_SUNRGBD_SEG = REL + '/datasets/sun_nyu2/sunrgbd_train_seg.txt'
-TEST_SUNRGBD_SEG = REL + '/datasets/sun_nyu2/sunrgbd_test_seg.txt'
+SUNRGBD_TRAIN_IMAGES = REL + '/datasets/sunrgbd_dataset/sunrgbd_images_train_final.txt'
+SUNRGBD_TEST_IMAGES = REL + '/datasets/sunrgbd_dataset/sunrgbd_images_test_final.txt'
+
+SUNRGBD_TRAIN_DEPTH = REL + '/datasets/sunrgbd_dataset/sunrgbd_depth_train_final.txt'
+SUNRGBD_TEST_DEPTH = REL + '/datasets/sunrgbd_dataset/sunrgbd_depth_test_final.txt'
+
+SUNRGBD_TRAIN_SEG = REL + '/datasets/sunrgbd_dataset/sunrgbd_seg_train_final.txt'
+SUNRGBD_TEST_SEG = REL + '/datasets/sunrgbd_dataset/sunrgbd_seg_test_final.txt'
+
+#SUNRGBD NYUv2
+NYU_TEST_IMAGES = REL + '/datasets/sun_nyu2/nyu_test_images.txt'
+NYU_TEST_DEPTH = REL + '/datasets/sun_nyu2/nyu_test_depth.txt'
+NYU_TEST_SEG = REL + '/datasets/sun_nyu2/nyu_test_seg.txt'
+
+#SN NYUv2
+NYU_RGB = REL + '/datasets/nyuv2/test_rgb/'
+NYU_DEPTH = REL + '/datasets/nyuv2/test_depth/'
+NYU_SN = REL + '/datasets/nyuv2/test_sn/'
 
 MAPPING = { 
             
@@ -99,7 +111,7 @@ class EarlyStopping:
     Early stops the training if validation loss doesn't improve after a given patience.
     
     """
-    def __init__(self, patience=12, verbose=False, delta=0, path=DEFAULT_CHECKPOINT_DIR+'/early_stopping_model.pth', task=None, timestamp='current'):
+    def __init__(self, patience=12, verbose=False, delta=0.001, path=DEFAULT_CHECKPOINT_DIR+'/early_stopping_model.pth', task=None, timestamp='current'):
         """
         Args:
             patience (int): How long to wait after last time validation loss improved.
@@ -183,7 +195,7 @@ def multitask_transformation(task, image, label, depth):
     if task == "surface_normal":
         
         image = torchvision.transforms.ToTensor()(image)
-        label = torch.from_numpy(np.array(label)/255.).type(torch.float32)  
+        label = torch.from_numpy(label).type(torch.float32)  
         depth = torch.from_numpy(np.array(depth)).type(torch.float32)
         
     elif task == "vanishing_point":
@@ -247,14 +259,17 @@ class Multitask_DatasetLoader(Dataset):
             depth = depth.resize(IMG_SIZE, Image.BILINEAR)
         
         elif self.task == "surface_normal":
-            lab = np.nan_to_num(np.load(self.label[idx])) 
-            lab = np.array(lab*255, dtype=np.float64)
-            label = Image.fromarray(lab.astype(np.uint8))
-            label = np.array(label.resize(IMG_SIZE, Image.NEAREST)).transpose(2, 0, 1)
-            norm = np.load(self.depth[idx])
-            norm = np.reshape(norm, (norm.shape[0], norm.shape[1]))
-            depth = Image.fromarray(norm/331.08224)
-            depth = depth.resize(IMG_SIZE, Image.BILINEAR)
+            label = np.load(self.label[idx])
+            label = label.transpose(2, 0, 1)
+            depth = np.load(self.depth[idx])
+        
+        elif self.task == "surface_normal_nyu":
+            
+            label = Image.open(self.label[idx])
+            res_label = np.array(label.resize(IMG_SIZE, Image.BILINEAR), dtype=np.float32)
+            label  = ((res_label*2)/255)-1
+            label = label.transpose(2, 0, 1)
+            depth =  Image.open(self.depth[idx])
             
         elif self.task == "vanishing_point":
             label = []
@@ -290,7 +305,7 @@ def train_transformation(task, image, label):
     if task == "surface_normal":
         
         image = torchvision.transforms.ToTensor()(image)
-        label = torch.from_numpy(np.array(label)/255.).type(torch.float32)       
+        label = torch.from_numpy(label).type(torch.float32)       
     
     elif task == "depth":
         image = torchvision.transforms.ToTensor()(image)
@@ -323,10 +338,12 @@ def test_transformation(task, image, label):
     """
     applies transformations on input images and their labels
     """
-    if task == "surface_normal":
-        
+
+
+    if task == "surface_normal" or task == "surface_normal_nyu":
+
         image = torchvision.transforms.ToTensor()(image)
-        label = torch.from_numpy(np.array(label)/255.).type(torch.float32) 
+        label = torch.from_numpy(label).type(torch.float32) 
         
     elif task == "vanishing_point":
         
@@ -363,7 +380,8 @@ class DatasetLoader(Dataset):
     def __getitem__(self, idx):
         
         image = Image.open(self.data[idx])
-        image = image.resize(IMG_SIZE, Image.BILINEAR)
+        if self.task != 'surface_normal':
+            image = image.resize(IMG_SIZE, Image.BILINEAR)
         
         if self.task == "segmentation":
             lab = np.array(Image.open(self.label[idx]))
@@ -375,10 +393,17 @@ class DatasetLoader(Dataset):
             label = label.resize(IMG_SIZE, Image.NEAREST)
                  
         elif self.task == "surface_normal":
-            lab = np.load(self.label[idx])
-            label = Image.fromarray(np.uint8(lab*255))
-            label = np.array(label.resize(IMG_SIZE, Image.BILINEAR)).transpose(2, 0, 1)
-        
+            label = np.load(self.label[idx])
+            # label = Image.fromarray(np.uint8(lab*255))
+            label = label.transpose(2, 0, 1)
+
+        elif self.task == "surface_normal_nyu":
+            
+            label = Image.open(self.label[idx])
+            res_label = np.array(label.resize(IMG_SIZE, Image.BILINEAR), dtype=np.float32)
+            label  = ((res_label*2)/255)-1
+            label = label.transpose(2, 0, 1)
+
         elif self.task == "depth":
             
             # lab = Image.open(self.label[idx])
@@ -452,40 +477,26 @@ def load_diode_sn_dataset():
     returns train and test images with their corresponding normals as labels
     """
     
-    data = {}
-    label = {}
-    depth = {}
-    
-    train_images = []
-    val_images = []
-    train_normals = []
-    val_normals = []
-    train_depth = []
-    val_depth = []
-    
-    for filename in glob.iglob(TRAIN_DIODE + '/**/*normal.npy', recursive=True):
-        path = filename[:-11] + ".png"
-        dep = filename[:-11] + "_depth.npy"
-        train_images.append(path)
-        train_normals.append(filename)
-        train_depth.append(dep)
+    data = {"train": [], "val":[]}
+    label = {"train": [], "val":[]}
+    depth = {"train": [], "val":[]}
+   
+    data['train'] = glob.glob(SN_TRAIN + '*.png')
+    for img in data['train']:
+        base = img.split('/')[-1][:-4]
+        norm = base + '_normal.npy'
+        dep = base + '_depth.npy'
+        label['train'].append(SN_TRAIN + norm)
+        depth['train'].append(SN_TRAIN + dep)
 
-    for filename in glob.iglob(TEST_DIODE + '/**/*normal.npy', recursive=True):
-        path = filename[:-11] + ".png"
-        dep = filename[:-11] + "_depth.npy"
-        val_images.append(path)
-        val_normals.append(filename)
-        val_depth.append(dep)
-    
-    index = np.random.permutation(len(train_images))
 
-    data['train'] = np.array(train_images)[index][:7000]
-    label['train'] = np.array(train_normals)[index][:7000]
-    depth['train'] = np.array(train_depth)[index][:7000]
-    
-    data['val'] = val_images
-    label['val'] = val_normals
-    depth['val'] = val_depth
+    data['val'] = glob.glob(SN_VAL + '*.png')
+    for img in data['val']:
+        base = img.split('/')[-1][:-4]
+        norm = base + '_normal.npy'
+        dep = base + '_depth.npy'
+        label['val'].append(SN_VAL + norm)
+        depth['val'].append(SN_VAL + dep)
     
     print("Size of train images : ", len(data['train']))
     print("Size of val images : ", len(data['val']))
@@ -609,52 +620,99 @@ def load_sunrgbd_dataset():
     """
     loads sunrgbd dataset rgb images with their corresponding segmentation and depth images.
     """
-    img = []
-    segm = []
-    dep = []
+
     images = {'train':[], 'val':[]}
     depth = {'train':[], 'val':[]}
     seg = {'train':[], 'val':[]} 
 
-    with open(TRAIN_SUNRGBD_IMAGES, 'r') as f:
+    with open(SUNRGBD_TRAIN_IMAGES, 'r') as f:
         for line in f:
-            img.append(os.path.join(REL, line.strip('\n')))
+            images['train'].append(os.path.join(REL, line.strip('\n')))
 
-    with open(TEST_SUNRGBD_IMAGES, 'r') as f:
+    with open(SUNRGBD_TEST_IMAGES, 'r') as f:
         for line in f:
-            img.append(os.path.join(REL, line.strip('\n')))
+            images['val'].append(os.path.join(REL, line.strip('\n')))
 
-    with open(TRAIN_SUNRGBD_DEPTH, 'r') as f:
+    with open(SUNRGBD_TRAIN_DEPTH, 'r') as f:
         for line in f:
-            dep.append(os.path.join(REL, line.strip('\n')))
+            depth['train'].append(os.path.join(REL, line.strip('\n')))
 
-    with open(TEST_SUNRGBD_DEPTH, 'r') as f:
+    with open(SUNRGBD_TEST_DEPTH, 'r') as f:
         for line in f:
-            dep.append(os.path.join(REL, line.strip('\n')))
+            depth['val'].append(os.path.join(REL, line.strip('\n')))
 
-    with open(TRAIN_SUNRGBD_SEG, 'r') as f:
+    with open(SUNRGBD_TRAIN_SEG, 'r') as f:
         for line in f:
-            segm.append(os.path.join(REL, line.strip('\n')))
-            
-    with open(TEST_SUNRGBD_SEG, 'r') as f:
+            seg['train'].append(os.path.join(REL, line.strip('\n')))
+
+    with open(SUNRGBD_TEST_SEG, 'r') as f:
         for line in f:
-            segm.append(os.path.join(REL, line.strip('\n')))
+            seg['val'].append(os.path.join(REL, line.strip('\n')))
 
-    index = np.random.permutation(len(img))
-    final_img = np.array(img)[index]
-    final_dep = np.array(dep)[index]
-    final_seg = np.array(segm)[index]
-    val = int(len(final_img)*0.8)
-
-    images['train'], images['val'] = final_img[:val], final_img[val:]
-    depth['train'], depth['val'] = final_dep[:val], final_dep[val:]
-    seg['train'], seg['val'] = final_seg[:val], final_seg[val:]
-
+    print("\nImages: ")
     print("Size of training data : ", len(images['train']))
     print("Size of validation data : ", len(images['val']))
+    print("\nDepth: ")
+    print("Size of training data : ", len(depth['train']))
+    print("Size of validation data : ", len(depth['val']))
+    print("\nSegmentation: ")
+    print("Size of training data : ", len(seg['train']))
+    print("Size of validation data : ", len(seg['val']), "\n")
+
 
     return images, seg, depth
 
+def load_sn_nyuv2_dataset():
+    """
+    loads sunrgbd dataset rgb images with their corresponding segmentation and depth images.
+    """
+
+    images = {'test':[]}
+    depth = {'test':[]}
+    sn = {'test':[]} 
+
+    images['test'] = glob.glob(NYU_RGB + '*.png')
+    depth['test'] = glob.glob(NYU_DEPTH + '*.png')
+    sn['test'] = glob.glob(NYU_SN + '*.png')
+
+
+    print("\nImages: ")
+    print("Size of test data : ", len(images['test']))
+    print("\nDepth: ")
+    print("Size of test data : ", len(depth['test']))
+    print("\nSurface Normal: ")
+    print("Size of test data : ", len(sn['test']), "\n")
+
+    return images, sn, depth
+
+def load_sun_nyuv2_dataset():
+    """
+    loads sunrgbd dataset rgb images with their corresponding segmentation and depth images.
+    """
+
+    images = {'test':[]}
+    depth = {'test':[]}
+    seg = {'test':[]} 
+
+    with open(NYU_TEST_IMAGES, 'r') as f:
+        for line in f:
+            images['test'].append(os.path.join(REL, line.strip('\n')))
+
+    with open(NYU_TEST_DEPTH, 'r') as f:
+        for line in f:
+            depth['test'].append(os.path.join(REL, line.strip('\n')))
+
+    with open(NYU_TEST_SEG, 'r') as f:
+        for line in f:
+            seg['test'].append(os.path.join(REL, line.strip('\n')))
+
+    print("\nImages: ")
+    print("Size of test data : ", len(images['test']))
+    print("\nDepth: ")
+    print("Size of test data : ", len(depth['test']))
+    print("\nSegmentation: ")
+    print("Size of test data : ", len(seg['test']), "\n")
+
+    return images, seg, depth
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-# VP and Seg igpu 21

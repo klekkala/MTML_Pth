@@ -6,12 +6,10 @@ import time
 import torch.nn as nn
 from PIL import Image, ImageFile
 import matplotlib.pyplot as plt
-
 from utils import EarlyStopping
 from networks import SegNet
 from utils import get_data_loader
 from utils import ConfMatrix
-from networks import VGG16Model
 from tempfile import TemporaryFile
 from numpy import savez_compressed
 
@@ -21,43 +19,140 @@ REL = os.getcwd()
 CHECKPOINT_DIR = REL + '/checkpoints/' 
 
 
-
-def run_inference(task, model, testloader):
+def singletask_inference(task, test_loader, best_model, best_result, DEVICE, filename):
     """
     returns performance of the model on test dataset
     """
-    valid_losses = []
-    model.eval()
+    task_test_losses = []
+
+    f = open(best_result + filename, 'w+')
+
+    if task == "vanishing_point":
+        criterion = torch.nn.MSELoss().to(DEVICE)
+        model = SegNet(3, 3).to(DEVICE)
+        model.load_state_dict(torch.load(best_model))
     
-    if task == "segmentation":
+    elif task == "segmentation":
+        model = SegNet(3, 14).to(DEVICE)
         criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
+        model.load_state_dict(torch.load(best_model))
         test_cm = ConfMatrix(14)
-        
-    elif task == "vanishing_point" or task == "surface_normal" or task == "depth":
-        criterion = nn.MSELoss().to(DEVICE)
+
+    elif task == "surface_normal":
+        criterion = torch.nn.MSELoss().to(DEVICE)
+        model = SegNet(3, 3)
+        model.load_state_dict(torch.load(best_model, map_location='cpu'))
+        model.to(DEVICE)
+    model.eval()
 
     with torch.no_grad():
-        for image, label in testloader:
+        for image, label in test_loader:
+
             image = image.to(DEVICE)
             label = label.to(DEVICE)
-            output = model(image)
-            if task=="depth":
-                output = torch.squeeze(output,1)
-                
+            
+            output = model(task, False, image)
+    
             loss = criterion(output, label)
-            valid_losses.append(loss.item())
+            task_test_losses.append(loss.item())
+
             if task == "segmentation":
+        
                 pred_values, predicted = torch.max(output, 1)
                 test_cm.update(predicted, label)
-                
-    v_epoch_loss = np.average(valid_losses)
     
+    test_loss = np.average(task_test_losses)
+
     if task == "segmentation":
-        iou, accuracy = test_cm.get_metrics()
-        print("Mean Pixel IoU: ",iou.item())
-        print("Accuracy: ",accuracy.item())  
+        test_iou, test_accuracy = test_cm.get_metrics() 
+        info = f"Segmentation Test Loss: {test_loss.item():.3f}.. "\
+            +f"Segmentation mIoU: {test_iou.item():0.3f}.."\
+            +f"Segmentation Pixel Accuracy: {test_accuracy.item():0.3f}"
+
+    else:
+        info = f"{task} Test Loss: {test_loss:.3f} "
+
+    print(info)
+    f.write(info)
+    f.close()
+    return
     
-    print("Final loss on test images: ",v_epoch_loss)    
+
+def multitask_inference(task, test_loader, best_model, best_result, DEVICE, fname):
+    """
+    returns performance of the model on test dataset
+    """
+    task_test_losses = []
+    depth_test_losses = []
+    total_test_losses = []
+
+    f = open(best_result + fname, 'w+')
+
+    if task == "vanishing_point_depth":
+        criterion_task = torch.nn.MSELoss().to(DEVICE)
+        criterion_depth = torch.nn.MSELoss().to(DEVICE)
+        model = SegNet(3, 3).to(DEVICE)
+        model.load_state_dict(torch.load(best_model))
+    
+    elif task == "segmentation_depth":
+        model = SegNet(3, 14).to(DEVICE)
+        criterion_task = torch.nn.CrossEntropyLoss().to(DEVICE)
+        criterion_depth = torch.nn.MSELoss().to(DEVICE)
+        model.load_state_dict(torch.load(best_model))
+        test_cm = ConfMatrix(14)
+
+    elif task == "surface_normal_depth":
+        criterion_task = torch.nn.MSELoss().to(DEVICE)
+        criterion_depth = torch.nn.MSELoss().to(DEVICE)
+        model = SegNet(3, 3).to(DEVICE)
+        model.load_state_dict(torch.load(best_model))
+
+    model.eval()
+
+    with torch.no_grad():
+        for image, label, depth in test_loader:
+     
+            image = image.to(DEVICE)
+            label = label.to(DEVICE)
+            depth = depth.to(DEVICE)
+
+            task_op, depth_op = model(task, True, image)
+            depth_op = torch.squeeze(depth_op,1)
+
+            task_loss = criterion_task(task_op, label)
+            depth_loss = criterion_depth(depth_op, depth)
+            loss = torch.mul(0.75, task_loss) + torch.mul(0.25, depth_loss)
+            
+            task_test_losses.append(task_loss.item())
+            depth_test_losses.append(depth_loss.item())
+            total_test_losses.append(loss.item())
+            
+            if task == "segmentation_depth":
+                pred_values, predicted = torch.max(task_op, 1)
+                test_cm.update(predicted, label)
+
+    task_loss = np.average(task_test_losses)
+    depth_loss = np.average(depth_test_losses)
+    total_loss = np.average(total_test_losses)
+
+    if task == "segmentation_depth":
+        test_iou, test_accuracy = test_cm.get_metrics() 
+        info = f"Total Test loss: {total_loss:.3f} "\
+                + f"Depth Test loss: {depth_loss:.3f} "\
+                + f"Segmentation Test loss: {task_loss:.3f} "\
+                + f"Test mIoU: {test_iou:.3f} "\
+                + f"Pixel accuracy: {test_accuracy:.3f} \n"
+    else:
+        info = f"Total Test loss: {total_loss:.3f} "\
+                + f"Depth Test loss: {depth_loss:.3f} "\
+                + f"{task} Test loss: {task_loss:.3f} "
+
+   
+    print(info)
+
+    f.write(info)
+    f.close()
+    return
     
     
 def multitask_train_loop(task, model, tloader, vloader, criterion, criterion_dep, optimizer, DEVICE):
@@ -252,6 +347,7 @@ def train_model(task, trainloader, valloader, timestr, results_record, DEVICE, L
     results_record.write("learning rate: "+str(LR))
     if task == "segmentation":
         model = SegNet(3, 14).to(DEVICE)
+        # model = nn.DataParallel(model)
         criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
         early_stop = EarlyStopping(patience=10, task='segmentation', timestamp=timestr)
         
@@ -263,6 +359,7 @@ def train_model(task, trainloader, valloader, timestr, results_record, DEVICE, L
     elif task == "segmentation_depth":
         multitask = True
         model = SegNet(3, 14).to(DEVICE)
+        # model = nn.DataParallel(model)
         criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
         criterion_dep = torch.nn.MSELoss().to(DEVICE)
         early_stop = EarlyStopping(patience=8, task='segmentation_depth', timestamp=timestr)
@@ -292,7 +389,7 @@ def train_model(task, trainloader, valloader, timestr, results_record, DEVICE, L
     elif task == "surface_normal":
         model = SegNet(3, 3).to(DEVICE)
         criterion = torch.nn.MSELoss().to(DEVICE)
-        early_stop = EarlyStopping(patience=7, task='surface_normal', timestamp=timestr)
+        early_stop = EarlyStopping(patience=10, task='surface_normal', timestamp=timestr)
     
     
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
@@ -365,10 +462,10 @@ def train_model(task, trainloader, valloader, timestr, results_record, DEVICE, L
             info = f"Epoch {epoch+1}/{EPOCHS} \n"\
                 + f"Total Train loss: {epoch_train_loss:.3f} "\
                 + f"Depth Train loss: {multiloss['dep_train']:.3f} "\
-                + f"SN Train loss: {multiloss['task_train']:.3f} "\
+                + f"VP Train loss: {multiloss['task_train']:.3f} "\
                 + f"Total Val loss: {epoch_val_loss:.3f} "\
                 + f"Depth Val loss: {multiloss['dep_val']:.3f} "\
-                + f"SN Val loss: {multiloss['task_val']:.3f} \n"
+                + f"VP Val loss: {multiloss['task_val']:.3f} \n"
 
             results_record.write(info)
             print(info)
@@ -403,7 +500,12 @@ def train_model(task, trainloader, valloader, timestr, results_record, DEVICE, L
 
 
 
+def retrain_depth(task, trainloader, valloader, timestr, results_record, DEVICE, LR, threshold=30):
 
-
-
-
+    if task == "segmentation_retrain":
+        
+        model = SegNet(3, 14).to(DEVICE)
+        # model = nn.DataParallel(model)
+        criterion_dep = torch.nn.MSELoss().to(DEVICE)
+        early_stop = EarlyStopping(patience=10, task=task, timestamp=timestr)
+        # YET TO DO PLEASE IGNORE
