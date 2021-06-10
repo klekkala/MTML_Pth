@@ -6,7 +6,12 @@ import torch.nn.functional as F
 from collections import OrderedDict
 from torchsummary import summary
 
-#------------------------------------------------------------------------------------------------------------------------------
+class Identity(nn.Module):
+    def __init__(self):
+        super(Identity, self).__init__()
+        
+    def forward(self, x):
+        return x
 
 def _add_decoder_blocks(input_dim, output_dim, name, large_decoder):
     """
@@ -71,15 +76,15 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__(*args, **kwargs)
 
         self.input_channels = input_channels
-
         vgg16_bn = torchvision.models.vgg16_bn(pretrained=True)
+
         maxpool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False, return_indices=True)
-        first_layer = nn.Conv2d(in_channels=self.input_channels, out_channels=64, kernel_size=3, stride=1, padding=1)
+
         features = list(vgg16_bn.features.children())
         weight = features[0].weight.data 
 
         # We need the maxpooled indices and the original pretrained model doesn't provide it, hence replacing it.
-        features[0], features[6], features[13], features[23], features[33], features[43] = first_layer, maxpool, maxpool, maxpool, maxpool, maxpool
+        features[6], features[13], features[23], features[33], features[43] = maxpool, maxpool, maxpool, maxpool, maxpool
         features[0].weight.data = weight
 
         # encoder
@@ -92,7 +97,7 @@ class Encoder(nn.Module):
 
 class Depth_Decoder(nn.Module):
     """
-    Class for Depth Decoder architecture
+    Class for Depth Decoder architecture. The last layer of decoder has just one channel and the activation function is Sigmoid.
     """
     def __init__(self, *args, **kwargs):
         super(Depth_Decoder, self).__init__(*args, **kwargs)
@@ -107,7 +112,9 @@ class Depth_Decoder(nn.Module):
 
 class Decoder(nn.Module):
     """
-    Class implementation of Generic task Decoder
+    Class implementation of Generic task Decoder.
+    :params: task = type of task - sn or seg
+             output_channels = No. of out_channels
     """
     def __init__(self, task, output_channels, *args, **kwargs):
         super(Decoder, self).__init__(*args, **kwargs)
@@ -124,7 +131,7 @@ class Decoder(nn.Module):
 
 class Segmentation(Decoder, Encoder):
     """
-    Class implementation of Segmentation Single-task
+    Class implementation of Segmentation Single-task. It inherits Decoder and Encoder base classes.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -152,10 +159,9 @@ class Segmentation(Decoder, Encoder):
         
         return y
 
-
 class Segmentation_Depth(Depth_Decoder, Segmentation):
     """
-    Class implementation of Segmentation Depth Multi-task
+    Class implementation of Segmentation Depth Multi-task. It inherits Segmentation and Depth Decoder base classes.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -184,13 +190,44 @@ class Segmentation_Depth(Depth_Decoder, Segmentation):
         return task_op, depth_op
 
 
-class Surfac_Normal(Decoder, Encoder):
+class Task_Depth(Decoder, Encoder):
     """
-    Class implementation of Surface Normal Single-task
+    Class implementation of Depth Single-task. It inherits Decoder and Encoder base classes.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.dec1.sn_dec1_act2 = nn.Tanh()
+        self.dec1.dep_dec1_act2 = nn.Sigmoid()
+
+    def forward(self, image):
+        
+        # task encoder
+        x, ind1 = self.enc1(image)
+        x, ind2 = self.enc2(x)
+        x, ind3 = self.enc3(x)
+        x, ind4 = self.enc4(x)
+        x, ind5 = self.enc5(x)
+
+        # task decoder
+        y = nn.MaxUnpool2d(kernel_size=2, stride=2 )(x, ind5) 
+        y = self.dec5(y)
+        y = nn.MaxUnpool2d(kernel_size=2, stride=2 )(y, ind4) 
+        y = self.dec4(y)
+        y = nn.MaxUnpool2d(kernel_size=2, stride=2 )(y, ind3) 
+        y = self.dec3(y)
+        y = nn.MaxUnpool2d(kernel_size=2, stride=2 )(y, ind2) 
+        y = self.dec2(y)
+        y = nn.MaxUnpool2d(kernel_size=2, stride=2 )(y, ind1) 
+        y = self.dec1(y)
+        
+        return y
+
+class Surface_Normal(Decoder, Encoder):
+    """
+    Class implementation of Surface Normal Single-task. It inherits Decoder and Encoder base classes.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dec1.sn_dec1_act2 = torch.nn.Tanh()
 
     def forward(self, image):
         
@@ -216,9 +253,9 @@ class Surfac_Normal(Decoder, Encoder):
         return y
 
 
-class Surface_Normal_Depth(Depth_Decoder, Surfac_Normal):
+class Surface_Normal_Depth(Depth_Decoder, Surface_Normal):
     """
-    Class implementation of Surface Normal Depth Multi-task
+    Class implementation of Surface Normal Depth Multi-task. It inherits Decoder Depth and Surface Normal base classes.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -250,7 +287,7 @@ class Surface_Normal_Depth(Depth_Decoder, Surfac_Normal):
 
 class VP(Encoder):
     """
-    Class for Vanishing point Model architecture.
+    Class for Vanishing point Model architecture.It inherits Encoder base class.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -285,7 +322,7 @@ class VP(Encoder):
 
 class VP_Depth(Depth_Decoder, VP):
     """
-    Class implementation of Vp Depth Multi-task
+    Class implementation of Vp Depth Multi-task. It inherits Decoder Depth and VP base classes.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -312,5 +349,3 @@ class VP_Depth(Depth_Decoder, VP):
         depth_op = self.depth_dec1(z)
 
         return task_op, depth_op
-
-
