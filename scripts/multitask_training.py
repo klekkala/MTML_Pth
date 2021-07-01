@@ -2,9 +2,9 @@ import torch
 import numpy as np
 import os
 import time
-from models import Segmentation_Depth, Surface_Normal_Depth, VP_Depth
+from models import Segmentation_Depth, Surface_Normal_Depth, VP_Depth, SegNet
 from utils import EarlyStopping
-from utils import ConfMatrix
+from utils import ConfMatrix, model_fit, depth_error
 
 
 EPOCHS = 200
@@ -420,3 +420,184 @@ def retrain_depth(task, best_model, train_loader, test_loader, timestr, fname, b
     losses = [train_loss, test_loss]
 
     return losses
+
+
+
+def multi_task_eval(task, test_loader, best_model, best_result, device, fname):
+
+    multi_task_model = SegNet().to(device)
+    multi_task_model.load_state_dict(torch.load(best_model))
+    test_batch = len(test_loader)
+    f = open(best_result + fname, 'w+')
+
+    multi_task_model.eval()
+    conf_mat = ConfMatrix(multi_task_model.class_nb)
+    cost = np.zeros(6, dtype=np.float32)
+    avg_cost = np.zeros([1, 6], dtype=np.float32)
+    index=0
+    with torch.no_grad():  
+        test_dataset = iter(test_loader)
+        for k in range(test_batch):
+            test_data, test_label, test_depth = test_dataset.next()
+            test_data, test_label = test_data.to(device), test_label.long().to(device)
+            test_depth = test_depth.to(device)
+            test_depth = test_depth.unsqueeze(1)
+
+            test_pred, _ = multi_task_model(test_data)
+            test_loss = [model_fit(test_pred[0], test_label, 'semantic'),
+                            model_fit(test_pred[1], test_depth, 'depth')]
+
+            conf_mat.update(test_pred[0].argmax(1).flatten(), test_label.flatten())
+
+            cost[0] = test_loss[0].item()
+            cost[3] = test_loss[1].item()
+            cost[4], cost[5] = depth_error(test_pred[1], test_depth)
+
+            avg_cost[index, :6] += cost[:6] / test_batch
+
+        # compute mIoU and acc
+        avg_cost[index, 1:3] = conf_mat.get_metrics()
+   
+
+    info = ('TEST: {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f}'
+        .format(avg_cost[index, 0], avg_cost[index, 1], avg_cost[index, 2], avg_cost[index, 3],
+                avg_cost[index, 4], avg_cost[index, 5]))
+    
+    f.write(info)
+    print(info)
+    f.close()
+    return 
+
+def multi_task_trainer(task, timestr, train_loader, test_loader, multi_task_model, device, total_epoch=200, results_record=None):
+    weight = 'dwa'
+    os.makedirs(CHECKPOINT_DIR + task +"/"+timestr)
+    early_stop = EarlyStopping(patience=10, task=task, timestamp=timestr)
+    early_stop_ = False
+    losses = {'train':[], 'test':[]}
+    accuracies = {'train':[], 'test':[]}
+
+    optimizer = torch.optim.Adam(multi_task_model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
+    train_batch = len(train_loader)
+    test_batch = len(test_loader)
+    T = 2.0
+    avg_cost = np.zeros([total_epoch, 12], dtype=np.float32)
+    lambda_weight = np.ones([3, total_epoch])
+    for index in range(total_epoch):
+        tr_loss = []
+        tst_loss = []
+        cost = np.zeros(12, dtype=np.float32)
+
+        # apply Dynamic Weight Average
+        if weight == 'dwa':
+            if index == 0 or index == 1:
+                lambda_weight[:, index] = 1.0
+            else:
+                w_1 = avg_cost[index - 1, 0] / avg_cost[index - 2, 0]
+                w_2 = avg_cost[index - 1, 3] / avg_cost[index - 2, 3]
+                w_3 = avg_cost[index - 1, 6] / avg_cost[index - 2, 6]
+                lambda_weight[0, index] = 3 * np.exp(w_1 / T) / (np.exp(w_1 / T) + np.exp(w_2 / T) + np.exp(w_3 / T))
+                lambda_weight[1, index] = 3 * np.exp(w_2 / T) / (np.exp(w_1 / T) + np.exp(w_2 / T) + np.exp(w_3 / T))
+                lambda_weight[2, index] = 3 * np.exp(w_3 / T) / (np.exp(w_1 / T) + np.exp(w_2 / T) + np.exp(w_3 / T))
+
+        # iteration for all batches
+        multi_task_model.train()
+        train_dataset = iter(train_loader)
+        conf_mat = ConfMatrix(multi_task_model.class_nb)
+
+        for k in range(train_batch):
+            train_data, train_label, train_depth = train_dataset.next()
+            train_data, train_label = train_data.to(device), train_label.long().to(device)
+            train_depth = train_depth.to(device)
+            train_depth = train_depth.unsqueeze(1)
+            
+            train_pred, logsigma = multi_task_model(train_data)
+
+            optimizer.zero_grad()
+            train_loss = [model_fit(train_pred[0], train_label, 'semantic'),
+                          model_fit(train_pred[1], train_depth, 'depth')]
+
+            if weight == 'equal' or weight == 'dwa':
+                loss = sum([lambda_weight[i, index] * train_loss[i] for i in range(2)])
+            else:
+                loss = sum(1 / (2 * torch.exp(logsigma[i])) * train_loss[i] + logsigma[i] / 2 for i in range(2))
+
+            
+            loss.backward()
+            optimizer.step()
+
+            # accumulate label prediction for every pixel in training images
+            conf_mat.update(train_pred[0].argmax(1).flatten(), train_label.flatten())
+
+            cost[0] = train_loss[0].item()
+            cost[3] = train_loss[1].item()
+            cost[4], cost[5] = depth_error(train_pred[1], train_depth)
+            tr_loss.append(cost[0]+cost[3])
+            
+            avg_cost[index, :6] += cost[:6] / train_batch
+
+        # compute mIoU and acc
+        avg_cost[index, 1:3] = conf_mat.get_metrics()
+        losses['train'].append(np.average(tr_loss))
+        accuracies['train'].append(avg_cost[index,2])
+        """
+        0 = segmentation loss
+        1 = mIoU
+        2 = pixel accuracy
+        3 = depth loss
+        4 = abs error
+        5 = rel error
+        """
+
+        # evaluating test data
+        multi_task_model.eval()
+        conf_mat = ConfMatrix(multi_task_model.class_nb)
+        with torch.no_grad():  # operations inside don't track history
+            test_dataset = iter(test_loader)
+            for k in range(test_batch):
+                test_data, test_label, test_depth = test_dataset.next()
+                test_data, test_label = test_data.to(device), test_label.long().to(device)
+                test_depth = test_depth.to(device)
+                test_depth = test_depth.unsqueeze(1)
+
+                test_pred, _ = multi_task_model(test_data)
+                test_loss = [model_fit(test_pred[0], test_label, 'semantic'),
+                             model_fit(test_pred[1], test_depth, 'depth')]
+
+                conf_mat.update(test_pred[0].argmax(1).flatten(), test_label.flatten())
+
+                cost[6] = test_loss[0].item()
+                cost[9] = test_loss[1].item()
+                cost[10], cost[11] = depth_error(test_pred[1], test_depth)
+
+                avg_cost[index, 6:] += cost[6:] / test_batch
+                tst_loss.append(cost[6]+cost[9])
+            # compute mIoU and acc
+            avg_cost[index, 7:9] = conf_mat.get_metrics()
+            losses['test'].append(np.average(tst_loss))
+            accuracies['test'].append(avg_cost[index, 8])
+        scheduler.step()
+        info = ('Epoch: {:04d} | TRAIN: {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f} ||'
+            'TEST: {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f}'
+            .format(index, avg_cost[index, 0], avg_cost[index, 1], avg_cost[index, 2], avg_cost[index, 3],
+                    avg_cost[index, 4], avg_cost[index, 5], avg_cost[index, 6], avg_cost[index, 7], avg_cost[index, 8],
+                    avg_cost[index, 9], avg_cost[index, 10], avg_cost[index, 11]))
+        
+        results_record.write(info)
+        print(info)
+        epoch_val_loss = avg_cost[index, 6] + avg_cost[index, 9]
+
+        early_stop(epoch_val_loss, multi_task_model, 'mtan')
+    
+        if early_stop.early_stop:
+            print("Early stopping")
+            early_stop_ = True
+            break 
+
+        if (index+1)%20==0:
+            torch.save(multi_task_model.state_dict(), CHECKPOINT_DIR + task +"/"+timestr+"/mtan_epoch_" + str(index+1) + ".pth")
+
+    if not early_stop_:
+        torch.save(multi_task_model.state_dict(), CHECKPOINT_DIR + task +"/"+timestr+"/mtan_final_model.pth")
+        
+    return losses, accuracies

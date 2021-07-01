@@ -1,20 +1,19 @@
 # Libraries
 import torch, torchvision
 import numpy as np
-import re, glob, os, time, random
+import re, os, time
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image, ImageFile
 import matplotlib.pyplot as plt
-import torch.nn as nn
-from scipy import io
 import sys
+import torch.nn.functional as F
 eps = sys.float_info.epsilon
 
 timestr = time.strftime("%Y%m%d-%H%M%S")
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # constant variables
-IMG_SIZE = (288, 384)
+IMG_SIZE = (384, 288)
 
 # checkpoint path
 REL = os.getcwd()
@@ -136,18 +135,36 @@ class ConfMatrix(object):
         if self.mat is None:
             self.mat = torch.zeros((n, n), dtype=torch.int64, device=pred.device)
         with torch.no_grad():
-            k = (target >= 1) & (target <= n)
-
+            k = (target >= 0) & (target < n)
             inds = n * target[k].to(torch.int64) + pred[k]
             self.mat += torch.bincount(inds, minlength=n ** 2).reshape(n, n)
 
     def get_metrics(self):
         h = self.mat.float()
-        h= h[1:,1:]
+        h = h[1:,1:]
         acc = torch.diag(h).sum() / h.sum()
         iu = torch.diag(h) / (h.sum(1) + h.sum(0) - torch.diag(h) + eps)
         return torch.mean(iu), acc
 
+# class ConfMatrix(object):
+#     def __init__(self, num_classes):
+#         self.num_classes = num_classes
+#         self.mat = None
+
+#     def update(self, pred, target):
+#         n = self.num_classes
+#         if self.mat is None:
+#             self.mat = torch.zeros((n, n), dtype=torch.int64, device=pred.device)
+#         with torch.no_grad():
+#             k = (target >= 0) & (target < n)
+#             inds = n * target[k].to(torch.int64) + pred[k]
+#             self.mat += torch.bincount(inds, minlength=n ** 2).reshape(n, n)
+
+#     def get_metrics(self):
+#         h = self.mat.float()
+#         acc = torch.diag(h).sum() / h.sum()
+#         iu = torch.diag(h) / (h.sum(1) + h.sum(0) - torch.diag(h))
+#         return torch.mean(iu), acc
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def multitask_transformation(task, image, label, depth):
@@ -395,3 +412,49 @@ def sort_images(temp):
     
     sortedimages = sorted(temp, key=lambda x: int(re.findall(r'\d+', x)[-1]))
     return sortedimages
+
+# ------------------------------------------------------------------ MTAN REPO ---------------------------------------------------------------------------------------------------------------------------------
+
+def depth_error(x_pred, x_output):
+
+    # x_output = x_output.unsqueeze(1)
+    device = x_pred.device
+    binary_mask = (torch.sum(x_output, dim=1) != 0).unsqueeze(1).to(device)
+    x_pred_true = x_pred.masked_select(binary_mask)
+    x_output_true = x_output.masked_select(binary_mask)
+
+    abs_err = torch.abs(x_pred_true - x_output_true)
+    rel_err = torch.abs(x_pred_true - x_output_true) / x_output_true
+    return (torch.sum(abs_err) / torch.nonzero(binary_mask, as_tuple=False).size(0)).item(), \
+           (torch.sum(rel_err) / torch.nonzero(binary_mask, as_tuple=False).size(0)).item()
+
+def normal_error(x_pred, x_output):
+    binary_mask = (torch.sum(x_output, dim=1) != 0)
+    error = torch.acos(torch.clamp(torch.sum(x_pred * x_output, 1).masked_select(binary_mask), -1, 1)).detach().cpu().numpy()
+    error = np.degrees(error)
+    return np.mean(error), np.median(error), np.mean(error < 11.25), np.mean(error < 22.5), np.mean(error < 30)
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def model_fit(x_pred, x_output, task_type):
+    device = x_pred.device
+
+    # binary mark to mask out undefined pixel space
+    binary_mask = (torch.sum(x_output, dim=1) != 0).float().unsqueeze(1).to(device)
+
+    if task_type == 'semantic':
+        # semantic loss: depth-wise cross entropy
+        loss = F.nll_loss(x_pred, x_output, ignore_index=-1)
+
+    if task_type == 'depth':
+        # depth loss: l1 norm
+        loss = torch.sum(torch.abs(x_pred - x_output) * binary_mask) / torch.nonzero(binary_mask, as_tuple=False).size(0)
+
+    if task_type == 'normal':
+        # normal loss: dot product
+        loss = 1 - torch.sum((x_pred * x_output) * binary_mask) / torch.nonzero(binary_mask, as_tuple=False).size(0)
+
+    return loss

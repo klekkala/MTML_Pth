@@ -7,8 +7,8 @@ from singletask_training import task_inference
 from singletask_training import train_model
 
 BATCH_SIZE = 16
-INFERENCE = False
-NYU = True
+INFERENCE = True
+NYU = False
 
 timestr = time.strftime("%Y%m%d-%H%M%S")
 
@@ -35,7 +35,7 @@ if INFERENCE:
     else:
         filename = 'test_results.txt'
 
-    test_loader = get_data_loader(TASK, data['test'], label['test'],  BATCH_SIZE)
+    test_loader = get_data_loader(TASK, data['val'], label['val'],  BATCH_SIZE)
 
     task_inference(TASK, test_loader, best_model, best_result, DEVICE, filename)
 
