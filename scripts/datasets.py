@@ -17,6 +17,8 @@ TEST_NYU_RGB_PATH = REL + "/datasets/nyuv2/test_rgb/"
 TEST_NYU_SEG_PATH = REL + "/datasets/nyuv2/test_seg13/"
 TRAIN_NYU_SN_PATH = REL + "/datasets/nyuv2/train_sn/"
 TEST_NYU_SN_PATH = REL + "/datasets/nyuv2/test_sn/"
+TRAIN_NYU_DEPTH_PATH = REL + ""
+TEST_NYU_DEPTH_PATH = REL + ""
 
 # Scannet VP
 TRAIN_VP = REL + '/datasets/scannet_vp/train/'
@@ -94,9 +96,36 @@ def load_diode_sn_dataset():
     return data, label, depth
 
 
+def load_nyuv2_dataset_v2():
+    data = {}
+    label = {}
+    depth = {}
+    normal = {}
+
+    train_images = glob.glob(TRAIN_NYU_RGB_PATH + "*.png")
+    train_labels = glob.glob(TRAIN_NYU_SEG_PATH + "*.png")
+    train_sn = glob.glob(TRAIN_NYU_SN_PATH + "*.png")
+    train_depth = glob.glob(TRAIN_NYU_DEPTH_PATH + "*.png")
+    index = np.random.permutation(len(train_images))
+    images = np.array(train_images)[index]
+    labels = np.array(train_labels)[index]
+    depths = np.array(train_depth)[index]
+    normals = np.array(train_sn)[index]
+    length = int(len(images) * 0.85)
+
+    data["train"], data["val"] = images[:length], images[length:]
+    label["train"], label["val"] = labels[:length], labels[length:]
+    depth["train"], depth["val"] = depths[:length], depths[length:]
+    normal["train"], normal["val"] = normals[:length], normals[length:]
+    data["test"] = glob.glob(TEST_NYU_RGB_PATH + "*.png")
+    label["test"] = glob.glob(TEST_NYU_SN_PATH + "*.png")
+    depth["test"] = glob.glob(TEST_NYU_DEPTH_PATH + "*.png")
+    normal["test"] = glob.glob(TEST_NYU_SN_PATH + "*.png")
+
+    return data, label, depth, normal
+
 
 # 2. Load nyuv2 dataset for segmentation and surface normal
-
 def load_nyuv2_dataset(flag):
     """
     returns dictionary of images and their corresponding annotations split into train, val and test
@@ -140,7 +169,49 @@ def load_nyuv2_dataset(flag):
 
 
 # 3. Load scannet vanishing points dataset
+def load_scannet_dataset():
+    """
+    returns training and validationimages and their corresponding vanishing points labels
+    """
 
+    data_image = {'train':[], 'test':[], 'val':[]}
+    vanish_point = {"train":[], 'test':[], 'val':[]}
+
+    def sort_images(temp):
+        sortedimages = sorted(temp, key=lambda x: int(re.findall(r'\d+', x)[-1]))
+        return sortedimages
+
+    def get_vp_dataset(path, dtype):
+        folders = os.listdir(path)
+        main_images = []
+        vanishing_points = []
+        vanishing_depth = []
+
+        for scene in folders:
+            images = glob.glob(path + scene + '/*color.png')
+            vanish = glob.glob(path + scene + '/*vanish.npz')
+
+            main_images.extend(sort_images(images))
+            vanishing_points.extend(sort_images(vanish))
+
+        data_image[dtype] = main_images
+        vanish_point[dtype] = vanishing_points
+
+        return
+
+    get_vp_dataset(TRAIN_VP, 'train')
+    get_vp_dataset(VAL_VP, 'val')
+    get_vp_dataset(TEST_VP, 'test')
+
+    print("Length of train data: ", len(data_image['train']))
+    print("Length of val data: ", len(data_image['val']))
+    print("Length of test data: ", len(data_image['test']))
+
+    print("Length of train vp: ", len(vanish_point['train']))
+    print("Length of val vp: ", len(vanish_point['val']))
+    print("Length of test vp: ", len(vanish_point['test']))
+
+    return data_image, vanish_point
 
 def load_scannet_vp_dataset():
     """

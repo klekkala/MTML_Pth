@@ -27,7 +27,7 @@ else:
 
 if INFERENCE:
 
-    best_model = CHECKPOINT_DIR + TASK + '/20210512-181847/early_stopping_model.pth' 
+    best_model = CHECKPOINT_DIR + TASK + '/20210512-181847/early_stopping_model.pth'  
     best_result = VIS_RESULTS_PATH + TASK + '/20210512-181847/' 
 
     if NYU:
